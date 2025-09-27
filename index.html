@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DOT RUSH — hypercasual (Sprint Addictive)</title>
+  <!-- PWA manifest and service worker registration -->
+  <link rel="manifest" href="./manifest.json">
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(err => console.error('SW error', err));
+    }
+  </script>
+  <!-- Google Ads (placeholder client ID) -->
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-XXXX" crossorigin="anonymous"></script>
+  <!-- Supabase CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    html, body { height: 100%; margin: 0; background: #0d0f14; color: #e6e8ef; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    canvas { display:block; width:100vw; height:100vh; }
+    #hud { position: fixed; top: 12px; left: 12px; right: 12px; display: flex; gap: 8px; align-items:center; flex-wrap: wrap; z-index:3 }
+    .pill { background: rgba(255,255,255,.07); padding: 6px 10px; border-radius: 999px; font-weight:700; letter-spacing:.4px }
+    .btn { background: rgba(255,255,255,.12); padding: 8px 12px; border-radius: 12px; font-weight:700; letter-spacing:.4px; cursor: pointer; user-select:none }
+    .btn:active { transform: translateY(1px); }
+    #cta { position: fixed; bottom: 22px; left: 0; right: 0; text-align: center; font-weight: 600; opacity: .85; z-index:1 }
+    #centerUI { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; z-index:2 }
+    #msg { text-align:center; font-weight:800; letter-spacing:1px; opacity:.92 }
+    .modal { position: fixed; inset: 0; display:none; place-items:center; background: rgba(0,0,0,.55); z-index:4 }
+    .card { width:min(92vw,520px); background:#121622; border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:16px; box-shadow: 0 20px 60px rgba(0,0,0,.35) }
+    .row { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 0; border-bottom:1px dashed rgba(255,255,255,.08) }
+    .row:last-child{ border-bottom:0 }
+    .small { opacity:.8; font-size:12px }
+    .grid { display:grid; grid-template-columns: repeat(4, 1fr); gap:10px }
+    .tile { background: rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:12px; display:grid; place-items:center; cursor:pointer }
+    .tile.equipped { outline:2px solid #6cf }
+    a.link { color:#9cf; text-decoration:none }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="hud">
+    <div class="pill">Score: <span id="score">0</span></div>
+    <div class="pill">Best: <span id="best">0</span></div>
+    <div class="pill">Combo: <span id="combo">x1</span></div>
+    <div class="pill">Coins: <span id="coins">0</span></div>
+    <div class="pill">Streak: <span id="streak">0</span> 🔥</div>
+    <div class="pill">Challenge: <span id="challenge">—</span></div>
+    <div class="btn" id="btnShop">Shop</div>
+    <div class="btn" id="btnQuests">Quests</div>
+    <div class="btn" id="btnSound">🔊</div>
+    <div class="btn" id="btnShare">Share</div>
+  </div>
+  <div id="centerUI"><div id="msg"></div></div>
+  <div id="cta">Tap / Click when the dot aligns with the GATE • Space/Enter works too</div>
+  <!-- SHOP MODAL -->
+  <div class="modal" id="shopModal">
+    <div class="card">
+      <div class="row"><strong>Cosmetics Shop</strong><span class="small">No pay-to-win • Pure style</span></div>
+      <div class="grid" id="skinsGrid"></div>
+      <div class="row"><div class="btn" id="closeShop">Close</div><div class="small">Tip: Earn coins by scoring high, quests & watching a revive ad.</div></div>
+    </div>
+  </div>
+  <!-- LEADERBOARD MODAL -->
+  <div class="modal" id="lbModal">
+    <div class="card">
+      <div class="row"><strong>Leaderboard</strong><span class="small">Global top 10</span></div>
+      <div id="lbList"></div>
+      <div class="row"><div class="btn" id="closeLB">Close</div><div class="small">Share your best and challenge friends!</div></div>
+    </div>
+  </div>
+  <!-- QUESTS MODAL -->
+  <div class="modal" id="questsModal">
+    <div class="card">
+      <div class="row"><strong>Daily Quests</strong><span class="small" id="dqDate"></span></div>
+      <div id="dqList"></div>
+      <div class="row"><div class="btn" id="closeQuests">Close</div><div class="small">Keep your daily streak for bonus chest!</div></div>
+    </div>
+  </div>
+<script>
+(() => {
+  // ---------- SUPABASE INIT ----------
+  // Use CDN v2 global `window.supabase`; guard if absent so game never crashes
+  const supa = (window.supabase && window.supabase.createClient)
+    ? window.supabase.createClient('https://YOUR_PROJECT_ID.supabase.co', 'YOUR_PUBLIC_ANON_KEY')
+    : null;
+
+  // ---------- UTIL ----------
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const rand=(a,b)=>Math.random()*(b-a)+a;
+  const randi=(a,b)=>Math.floor(rand(a,b));
+  const todayKey = ()=> new Date().toISOString().slice(0,10);
+
+  // ---------- STORAGE ----------
+  const store = {
+    get k(){ return JSON.parse(localStorage.getItem('dotrush')||'{}'); },
+    set k(v){ localStorage.setItem('dotrush', JSON.stringify(v)); },
+    read(key, def){ const k=this.k; return (key in k)?k[key]:def; },
+    write(patch){ const k=this.k; Object.assign(k, patch); this.k=k; }
+  };
+  if (!store.read('init', false)){
+    store.write({ init:true, best:0, coins:0, ownedSkins:['classic'], equipped:'classic', streak:0, lastPlay:'', audio:true, prestige:false, top:[] });
+  }
+
+  // ---------- ADS (safe shim) ----------
+  let rewardedAd = null;
+  function preloadRewarded() {
+    try {
+      const hasAPI = (window.adsbygoogle && window.adsbygoogle.RewardedAd);
+      if (hasAPI) {
+        rewardedAd = new window.adsbygoogle.RewardedAd({ adUnitId: 'ca-app-pub-XXXX/ZZZZ' });
+        rewardedAd.load();
+      } else {
+        rewardedAd = { isLoaded: () => false, show: async () => false };
+      }
+    } catch(e){ rewardedAd = { isLoaded: () => false, show: async () => false }; }
+  }
+
+  async function tryRevive() {
+    if (state.revived || state.running) return;
+    if (!rewardedAd || !rewardedAd.isLoaded || !rewardedAd.isLoaded()) {
+      // fallback – keep UX and monetization point while not integrated
+      const ok = await fakeRewardedAd();
+      if (ok) {
+        state.revived = true; state.running = true;
+        flash(0.15); toast('Revived!');
+        state.target.w = Math.max(state.target.w, Math.PI/7);
+        state.shakeTime = 0.6;
+        addCoins(50);
+      }
+      return;
+    }
+    const ok = await rewardedAd.show();
+    if (ok) {
+      state.revived = true; state.running = true;
+      flash(0.15); toast('Revived!');
+      state.target.w = Math.max(state.target.w, Math.PI/7);
+      state.shakeTime = 0.6;
+      addCoins(50);
+    } else {
+      toast('Ad unavailable');
+    }
+    preloadRewarded();
+  }
+  function fakeRewardedAd(){
+    return new Promise(res=>{
+      msg('Loading ad…',1000);
+      setTimeout(()=>{
+        msg('Thanks for watching! +50 coins', 1200);
+        addCoins(50);
+        res(true);
+      }, 1800);
+    });
+  }
+
+  // ---------- AUDIO ----------
+  let audioCtx=null; function ensureAC(){ if (!store.read('audio',true)) return; if (!audioCtx){ audioCtx = new (window.AudioContext||window.webkitAudioContext)(); } }
+  function beep(freq=600, dur=0.08, type='sine', gain=0.03){ if (!store.read('audio',true)) return; ensureAC(); const o=audioCtx.createOscillator(); const g=audioCtx.createGain(); o.type=type; o.frequency.value=freq; g.gain.value=gain; o.connect(g).connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime+dur); }
+
+  // ---------- CANVAS ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W,H,dpr; function resize(){ dpr=Math.min(2,devicePixelRatio||1); W=canvas.width=Math.floor(innerWidth*dpr); H=canvas.height=Math.floor(innerHeight*dpr); }
+  addEventListener('resize', resize, {passive:true}); resize();
+
+  // ---------- UI ELEMS ----------
+  const scoreEl = document.getElementById('score');
+  const bestEl  = document.getElementById('best'); bestEl.textContent = store.read('best',0);
+  const comboEl = document.getElementById('combo');
+  const coinsEl = document.getElementById('coins'); coinsEl.textContent = store.read('coins',0);
+  const streakEl= document.getElementById('streak'); streakEl.textContent= store.read('streak',0);
+  const msgEl   = document.getElementById('msg');
+  const btnShop = document.getElementById('btnShop');
+  const btnQuests=document.getElementById('btnQuests');
+  const btnSound= document.getElementById('btnSound'); btnSound.textContent = store.read('audio',true)?'🔊':'🔇';
+  const btnShare= document.getElementById('btnShare');
+  const challengeEl = document.getElementById('challenge');
+
+  // ---------- DAILY CHALLENGE ----------
+  const CHALLENGES = [
+    { id:'nofever10', text:'10 hits bez FEVER-a', check:(run)=> run.noFeverHits>=10, reward:200 },
+    { id:'combo5', text:'Combo 5+', check:(run)=> run.maxCombo>=5, reward:150 },
+    { id:'score300', text:'Score 300+', check:(run)=> run.score>=300, reward:250 }
+  ];
+  function ensureDailyChallenge(){
+    const key=todayKey();
+    let dc=store.read('dc',null);
+    if (!dc || dc.date!==key){
+      dc={date:key, id: CHALLENGES[randi(0,CHALLENGES.length)].id, done:false};
+      store.write({dc});
+    }
+    const cfg = CHALLENGES.find(c=>c.id===dc.id);
+    challengeEl.textContent = cfg?cfg.text:'—';
+    return {dc, cfg};
+  }
+
+  // ---------- DQ (daily quests) ----------
+  const DQ = {
+    ensure(){
+      const key = todayKey();
+      let q = store.read('dq',{});
+      if (q.date!==key){
+        q = { date:key, quests:[
+          { id:'play3',   text:'Play 3 rounds', goal:3,  prog:0, reward:150 },
+          { id:'score200',text:'Score 200 in one run', goal:1, prog:0, reward:200 },
+          { id:'perfect10',text:'10 perfect hits total', goal:10, prog:0, reward:250 }
+        ], claimed:false };
+        store.write({ dq:q });
+      } else { store.write({ dq:q }); }
+      return q;
+    },
+    save(q){ store.write({ dq:q }); }
+  };
+
+  // ---------- ECONOMY ----------
+  function coins(){ return store.read('coins',0); }
+  function setCoins(v){ store.write({ coins:v }); coinsEl.textContent=v; }
+  function addCoins(v){ setCoins(coins()+Math.floor(v)); }
+
+  // ---------- SKINS ----------
+  const SKINS = [
+    { id:'classic', name:'Classic', price:0,  theme:{dot:'#6cf', trail:'#9cf', gate:'rgba(255,255,255,0.6)'} },
+    { id:'neon',    name:'Neon',    price:300,theme:{dot:'#00f5d4', trail:'#80ffea', gate:'rgba(255,255,255,0.7)'} },
+    { id:'sunset',  name:'Sunset',  price:500,theme:{dot:'#ff6b6b', trail:'#ffd166', gate:'rgba(255,255,255,0.7)'} },
+    { id:'violet',  name:'Violet',  price:800,theme:{dot:'#b388ff', trail:'#e2caff', gate:'rgba(255,255,255,0.7)'} },
+    { id:'gold',    name:'Gold',    price:1200,theme:{dot:'#ffd700', trail:'#fff0a6', gate:'rgba(255,255,255,0.8)'} }
+  ];
+  function applyEquipped(){
+    const eq = store.read('equipped','classic');
+    const skin = SKINS.find(s=>s.id===eq) || SKINS[0];
+    state.theme = skin.theme;
+    renderSkinsGrid();
+  }
+
+  // ---------- GAME STATE ----------
+  const state = {
+    running:false, revived:false,
+    score:0, combo:1, maxCombo:1, level:1, speed:1.3, orbitR:140, ang:0,
+    center:{x:W/2,y:H/2},
+    target:{a:0, w: Math.PI/18},
+    grace:0.12, particles:[], flash:0, inputLocked:false,
+    perfectMeter:0, fever:false, feverTime:0,
+    theme:{ dot:'#6cf', trail:'#9cf', gate:'rgba(255,255,255,0.6)' },
+    hitCount:0, nextPowerStep:randi(5,11),
+    ghostPath:[], lastGhostPath:[],
+    shakeTime:0, noFeverHits:0,
+    slowMoTime:0
+  };
+  addEventListener('resize', ()=>{ state.center.x=W/2; state.center.y=H/2; }, {passive:true});
+
+  // ---------- PARTICLES ----------
+  function emit(x,y,n=10, col=state.theme.trail){ for (let i=0;i<n;i++) state.particles.push({x,y, vx:rand(-2,2), vy:rand(-2,2), a:1, r:rand(1,3), col}); }
+  function emojiBurst(x,y,emoji='💎'){ state.particles.push({x,y, vx:0, vy:-1.2, a:1, r:12, emoji}); }
+
+  // ---------- TARGET ----------
+  function spawnGate(){
+    let a = rand(0,Math.PI*2);
+    if (Math.abs(a - state.target.a) < 0.6) a += 1.0;
+    state.target.a = (a)%(Math.PI*2);
+    if (state.level>10) state.orbitR = randi(120,160);
+    state.target.w = Math.max(Math.PI/24, Math.PI/10 - state.level*0.01);
+    if (state.level>10 && Math.random()<0.10){ state.speed *= -1; toast('Reverse!'); }
+    state.speed = clamp(state.speed, -3, 3);
+  }
+
+  // ---------- SCORE ----------
+  function addScore(pts){
+    const prestige = store.read('prestige',false) ? 1.5 : 1.0;
+    const before = state.score;
+    state.score += Math.floor(pts*state.combo*(state.fever?2:1)*prestige);
+    scoreEl.textContent = state.score;
+    const best= store.read('best',0);
+    if (state.score>best){ store.write({best:state.score}); bestEl.textContent=state.score; }
+    if (Math.floor(before/100) !== Math.floor(state.score/100) && state.score>0){
+      const idx = randi(1, SKINS.length);
+      state.theme = SKINS[idx%SKINS.length].theme;
+      toast('New theme unlocked!');
+    }
+  }
+
+  // ---------- FEEDBACK ----------
+  function flash(r=0.25){ state.flash=Math.min(0.35, r); }
+  function toast(t){ msg(t, 1400); }
+  let msgTimer=null; function msg(html, ms){ clearTimeout(msgTimer); msgEl.innerHTML=html; msgEl.style.opacity=1; msgEl.style.pointerEvents='none'; msgTimer=setTimeout(()=>{ msgEl.style.opacity=0; }, ms||1000); }
+
+  // ---------- STREAK / PRESTIGE ----------
+  function updateStreakOnPlay(){
+    const last = store.read('lastPlay','');
+    const today = todayKey();
+    if (last!==today){
+      let s = store.read('streak',0);
+      const yest = new Date(); yest.setDate(yest.getDate()-1);
+      const yKey = yest.toISOString().slice(0,10);
+      s = (last===yKey) ? s+1 : 1;
+      let prestige = store.read('prestige',false);
+      if (s>=7 && !prestige){ prestige=true; s=1; toast('Prestige unlocked! x1.5 score'); }
+      store.write({ streak:s, lastPlay:today, prestige });
+      streakEl.textContent = s;
+      const bonus = 20 + Math.min(200, s*10);
+      addCoins(bonus); toast(`Daily streak +${bonus} coins`);
+    }
+  }
+
+  // ---------- GHOST RUN ----------
+  function startGhost(){ state.ghostPath=[]; }
+  function recordGhost(){
+    const x=state.center.x+Math.cos(state.ang)*(state.orbitR*dpr);
+    const y=state.center.y+Math.sin(state.ang)*(state.orbitR*dpr);
+    state.ghostPath.push({x,y}); if (state.ghostPath.length>800) state.ghostPath.shift();
+  }
+  function saveGhost(){ state.lastGhostPath = state.ghostPath.slice(); }
+  function drawGhost(){
+    if (!state.lastGhostPath.length) return;
+    ctx.save(); ctx.globalAlpha=0.25; ctx.beginPath();
+    for (let i=0;i<state.lastGhostPath.length;i++){ const p=state.lastGhostPath[i]; if (i===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y); }
+    ctx.strokeStyle='rgba(156,207,255,0.6)'; ctx.lineWidth=2*dpr; ctx.stroke(); ctx.restore();
+  }
+
+  // ---------- LEADERBOARD (local + global) ----------
+  function updateLeaderboardLocal(score){
+    let top = store.read('top', []);
+    top.push({ n: 'You', s: score });
+    const need = Math.max(0, 10 - top.length);
+    for (let i=0;i<need;i++) top.push({ n: 'Player'+randi(100,999), s: randi(200, 700) });
+    top = top.sort((a,b)=>b.s-a.s).slice(0,10);
+    store.write({ top });
+    return top;
+  }
+  async function updateLeaderboardGlobal(score){
+    if (!supa) return;
+    try {
+      const { error: insErr } = await supa.from('scores').insert([{ name: 'You', score }]);
+      if (insErr) { console.error('Supabase insert error', insErr); return; }
+      const { data: globalTop, error: selErr } = await supa
+        .from('scores').select('name, score')
+        .order('score', { ascending: false }).limit(10);
+      if (selErr) { console.error('Supabase select error', selErr); return; }
+      if (globalTop) store.write({ top: globalTop.map(g => ({ n: g.name, s: g.score })) });
+      renderLeaderboard();
+    } catch(e){ console.error('Supabase unexpected', e); }
+  }
+  function renderLeaderboard(){
+    const list = document.getElementById('lbList');
+    const top = store.read('top', []);
+    list.innerHTML = top.map((t,i)=>`<div class="row"><div>#${i+1} <strong>${t.n}</strong></div><div>${t.s}</div></div>`).join('');
+  }
+
+  const lbModal = document.getElementById('lbModal');
+  const closeLB = document.getElementById('closeLB');
+  closeLB.onclick = ()=> lbModal.style.display='none';
+
+  // ---------- LOOP ----------
+  let lastTime=0; function loop(t){ requestAnimationFrame(loop); const dt=Math.min(32,t-lastTime)/1000; lastTime=t; update(dt); render(); }
+  function update(dt){
+    if (!state.running) return;
+    const speedMod = state.slowMoTime > 0 ? 0.5 : 1;
+    state.ang += dt * state.speed * speedMod;
+    if (state.fever){ state.feverTime -= dt; if (state.feverTime<=0){ state.fever=false; toast('Fever end'); } }
+    if (state.slowMoTime>0){ state.slowMoTime -= dt; if (state.slowMoTime<=0) toast('Slow-Mo end'); }
+    if (state.shakeTime>0) state.shakeTime=Math.max(0,state.shakeTime-dt);
+    state.particles.forEach(p=>{ p.x+=p.vx*speedMod; p.y+=p.vy*speedMod; p.a-=0.02; });
+    state.particles = state.particles.filter(p=>p.a>0);
+    if (state.particles.length>800) state.particles.splice(0, state.particles.length-800);
+    recordGhost();
+  }
+  function drawGate(cx,cy,r,a,w){ ctx.save(); ctx.translate(cx,cy); ctx.rotate(a); ctx.beginPath(); ctx.strokeStyle=state.theme.gate; ctx.lineWidth=6*dpr; ctx.arc(0,0,r,-w/2,w/2); ctx.stroke(); ctx.restore(); }
+  function drawDot(cx,cy,r,a){ const x=cx+Math.cos(a)*r; const y=cy+Math.sin(a)*r; ctx.beginPath(); ctx.fillStyle=state.theme.dot; ctx.arc(x,y, 10*dpr, 0, Math.PI*2); ctx.fill(); return {x,y}; }
+  function render(){
+    if (state.shakeTime>0){ ctx.save(); ctx.translate(rand(-3,3), rand(-3,3)); }
+    ctx.clearRect(0,0,W,H);
+    if (state.flash>0){ ctx.fillStyle=`rgba(255,0,60,${state.flash})`; ctx.fillRect(0,0,W,H); state.flash-=0.04; }
+    ctx.beginPath(); ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.lineWidth=2*dpr; ctx.arc(state.center.x,state.center.y,state.orbitR*dpr,0,Math.PI*2); ctx.stroke();
+    if (!state.running) drawGhost();
+    if (state.fever){ const g=ctx.createRadialGradient(state.center.x,state.center.y,10,state.center.x,state.center.y,150); g.addColorStop(0,'rgba(255,255,255,0.10)'); g.addColorStop(1,'rgba(255,255,255,0)'); ctx.fillStyle=g; ctx.beginPath(); ctx.arc(state.center.x,state.center.y,150*dpr,0,Math.PI*2); ctx.fill(); }
+    if (state.slowMoTime>0){ const g=ctx.createRadialGradient(state.center.x,state.center.y,10,state.center.x,state.center.y,100); g.addColorStop(0,'rgba(0,255,255,0.15)'); g.addColorStop(1,'rgba(0,255,255,0)'); ctx.fillStyle=g; ctx.beginPath(); ctx.arc(state.center.x,state.center.y,100*dpr,0,Math.PI*2); ctx.fill(); }
+    drawGate(state.center.x,state.center.y,state.orbitR*dpr,state.target.a,state.target.w);
+    const {x,y}= drawDot(state.center.x,state.center.y,state.orbitR*dpr,state.ang);
+    state.particles.forEach(p=>{ ctx.globalAlpha=Math.max(0,p.a); if (p.emoji){ ctx.font=`${p.r*2*dpr}px system-ui`; ctx.fillText(p.emoji, p.x, p.y); } else { ctx.beginPath(); ctx.fillStyle=p.col; ctx.arc(p.x,p.y,p.r*dpr,0,Math.PI*2); ctx.fill(); } ctx.globalAlpha=1; });
+    if (state.shakeTime>0){ ctx.restore(); }
+  }
+  requestAnimationFrame(loop);
+
+  // ---------- INPUT ----------
+  function perfectPitch(){ const base = 620 + state.perfectMeter*18 + (state.combo*8); beep(base,0.045,'square',0.03); }
+  function handleInput(){
+    if (!state.running){ reset(); return; }
+    if (state.inputLocked) return; state.inputLocked=true; setTimeout(()=>state.inputLocked=false,80);
+    const diff = Math.abs(((state.ang - state.target.a + Math.PI*3)%(Math.PI*2)) - Math.PI);
+    const hit = diff < (state.target.w/2 + state.grace);
+    if (hit){
+      state.hitCount++;
+      addScore(10);
+      state.combo = clamp(state.combo+0.25,1,10); state.maxCombo=Math.max(state.maxCombo,state.combo); comboEl.textContent='x'+state.combo.toFixed(1);
+      state.level += 0.25; state.speed += 0.03; state.speed = clamp(state.speed, -3, 3); state.grace = Math.max(0.04, state.grace-0.002);
+      const p=drawDot(state.center.x,state.center.y,state.orbitR*dpr,state.ang); emit(p.x,p.y,16,state.theme.trail); flash(0.06); perfectPitch();
+      if (diff < state.target.w/4){
+        state.perfectMeter = clamp(state.perfectMeter+1,0,12);
+        if (state.perfectMeter%4===0 && !state.fever){ state.fever=true; state.feverTime=5; toast('FEVER x2'); state.shakeTime=0.4; }
+      }
+      if (!state.fever) state.noFeverHits++; else state.noFeverHits=0;
+      // Power-ups (20% chance after 5–10 hits)
+      if (state.hitCount >= state.nextPowerStep && Math.random()<0.2){
+        state.nextPowerStep = state.hitCount + randi(5,11);
+        const r = Math.random();
+        if (r<0.33){ // Wild Gate
+          state.target.w *= 1.5; toast('Wild Gate!'); emojiBurst(p.x,p.y,'⭐'); addCoins(3);
+        } else if (r<0.66) { // Coin Burst
+          const gain = 5 + randi(0,6); addCoins(gain); toast('Coin Burst +'+gain); emojiBurst(p.x,p.y,'💎');
+        } else { // Slow-Mo power-up
+          state.slowMoTime = 5; toast('Slow-Mo!'); emojiBurst(p.x,p.y,'⏲️'); addCoins(3);
+        }
+      }
+      spawnGate();
+      if ("vibrate" in navigator) navigator.vibrate(state.combo>=5?20:10);
+    } else {
+      state.combo=1; comboEl.textContent='x1'; state.speed=Math.max(1.2,state.speed*0.98);
+      gameOver();
+      const q=DQ.ensure(); if (state.score>=200){ const qq=q.quests.find(x=>x.id==='score200'); if (qq && qq.prog<qq.goal){ qq.prog=qq.goal; } }
+      const q2=q.quests.find(x=>x.id==='play3'); if (q2) { q2.prog = clamp(q2.prog+1,0,q2.goal); } DQ.save(q);
+    }
+  }
+  addEventListener('pointerdown', handleInput);
+  addEventListener('keydown', e=>{ if (e.code==='Space'||e.code==='Enter') handleInput(); if (e.key==='m'){ toggleAudio(); }});
+
+  // ---------- GAME FLOW ----------
+  function reset(){
+    state.running=true; state.revived=false; state.score=0; state.combo=1; state.maxCombo=1; state.level=1; state.speed=1.3; state.grace=0.12; state.ang=0; state.particles=[]; state.fever=false; state.feverTime=0; state.perfectMeter=0; state.hitCount=0; state.noFeverHits=0; state.nextPowerStep=randi(5,11); state.shakeTime=0; state.slowMoTime=0;
+    scoreEl.textContent=0; comboEl.textContent='x1';
+    spawnGate();
+    applyEquipped();
+    startGhost();
+    msg('DOT RUSH', 800);
+    updateStreakOnPlay();
+  }
+  function gameOver(){
+    state.running=false; flash(0.25); beep(200,0.08,'sawtooth',0.05);
+    const coinGain = 5 + Math.floor(state.score*0.1);
+    addCoins(coinGain);
+    saveGhost();
+    const {dc,cfg} = ensureDailyChallenge();
+    if (cfg){ const run = { score:state.score, maxCombo:state.maxCombo, noFeverHits:state.noFeverHits }; if (!store.read('dc',{}).done && cfg.check(run)){ addCoins(cfg.reward); const x=store.read('dc'); x.done=true; store.write({dc:x}); toast('Daily challenge complete! +'+cfg.reward); } }
+    const _top = updateLeaderboardLocal(state.score);
+    renderLeaderboard();
+    updateLeaderboardGlobal(state.score);
+    msg(`Game Over • +${coinGain} coins<br><small><em>Beat your ghost!</em> &nbsp; <span class="link" id="lbLink">Leaderboard</span> &nbsp; Tap to retry ${!state.revived? '• or <span class="link" id="reviveLink">Watch to revive</span>':''}</small>`, 6000);
+    setTimeout(()=>{
+      const link=document.getElementById('reviveLink'); if (link) link.addEventListener('click', tryRevive);
+      const lb=document.getElementById('lbLink'); if(lb){ lb.addEventListener('click', ()=>{ lbModal.style.display='grid'; }); }
+    },10);
+  }
+
+  // ---------- SHOP UI ----------
+  const shopModal = document.getElementById('shopModal');
+  const skinsGrid = document.getElementById('skinsGrid');
+  const closeShop = document.getElementById('closeShop');
+  btnShop.onclick = ()=>{ renderSkinsGrid(); shopModal.style.display='grid'; };
+  closeShop.onclick= ()=> shopModal.style.display='none';
+  function renderSkinsGrid(){ const owned = new Set(store.read('ownedSkins',['classic'])); const eq = store.read('equipped','classic'); skinsGrid.innerHTML=''; SKINS.forEach(s=>{ const tile=document.createElement('div'); tile.className='tile'+(eq===s.id?' equipped':''); tile.innerHTML=`<div style="width:48px;height:48px;border-radius:50%;background:${s.theme.dot}"></div><div style="margin-top:6px;font-weight:700">${s.name}</div><div class="small">${owned.has(s.id)?(eq===s.id?'Equipped':'Owned'):s.price+' coins'}</div>`; tile.onclick=()=>{ if (owned.has(s.id)){ store.write({ equipped:s.id }); applyEquipped(); toast('Equipped '+s.name); } else { const c=coins(); if (c>=s.price){ setCoins(c-s.price); const o=[...owned]; o.push(s.id); store.write({ ownedSkins:o }); toast('Purchased '+s.name); applyEquipped(); } else toast('Not enough coins'); } }; skinsGrid.appendChild(tile); }); }
+
+  // ---------- QUESTS UI ----------
+  const questsModal=document.getElementById('questsModal');
+  const dqList=document.getElementById('dqList');
+  const dqDate=document.getElementById('dqDate');
+  const closeQuests=document.getElementById('closeQuests');
+  btnQuests.onclick=()=>{ renderQuests(); questsModal.style.display='grid'; };
+  closeQuests.onclick=()=> questsModal.style.display='none';
+  function renderQuests(){ const q=DQ.ensure(); dqDate.textContent=q.date; dqList.innerHTML=''; q.quests.forEach(item=>{ const row=document.createElement('div'); row.className='row'; const done = item.prog>=item.goal; row.innerHTML=`<div><div><strong>${item.text}</strong></div><div class="small">${item.prog}/${item.goal}</div></div><div>${done?`<span class="pill">+${item.reward} coins</span>`:`<div class="btn">Claim</div>`}</div>`; const btn = row.querySelector('.btn'); if (btn){ btn.onclick=()=>{ if (item.prog>=item.goal){ addCoins(item.reward); item.goal+=9999; renderQuests(); toast('Quest claimed'); DQ.save(q); } else { toast('Keep going!'); } }; } dqList.appendChild(row); }); }
+
+  // ---------- AUDIO TOGGLE & SHARE ----------
+  function toggleAudio(){ const cur=store.read('audio',true); store.write({audio:!cur}); btnSound.textContent=!cur?'🔊':'🔇'; if (!cur){ ensureAC(); beep(880,0.05,'sine',0.02); } }
+  btnSound.onclick=toggleAudio;
+  btnShare.onclick=async()=>{ try{ if (navigator.share){ await navigator.share({ title:'DOT RUSH', text:`I scored ${store.read('best',0)} in DOT RUSH 🔥 Can you beat me?` }); } else { toast('Share not supported'); } } catch(e){} };
+
+  // ---------- SELF-TESTS (run with ?test=1) ----------
+  function runSelfTests(){
+    const results=[]; const assert=(name,cond)=>results.push({name,pass:!!cond});
+    try {
+      const prev={score:state.score, combo:state.combo, fever:state.fever, speed:state.speed, slowMoTime:state.slowMoTime};
+      state.score=0; state.combo=1; state.fever=false; state.slowMoTime=0; store.write({prestige:false});
+      addScore(10); assert('addScore increments by 10', state.score===10);
+      const oldA=state.target.a; spawnGate(); assert('spawnGate sets new angle', state.target.a!==oldA);
+      assert('target width within bounds', state.target.w<=Math.PI/10 && state.target.w>=Math.PI/24);
+      state.speed=10; spawnGate(); assert('speed clamped upper', state.speed<=3);
+      state.speed=-10; spawnGate(); assert('speed clamped lower', state.speed>=-3);
+      const top=updateLeaderboardLocal(123); assert('leaderboard sorted', top.every((v,i,arr)=> i===0 || (arr[i-1].s>=v.s)) );
+      state.slowMoTime=1; update(0.1); assert('slowMo reduces speed', state.ang < 0.15);
+      state.score=prev.score; state.combo=prev.combo; state.fever=prev.fever; state.speed=prev.speed; state.slowMoTime=prev.slowMoTime;
+      console.log('%cDOTRUSH TESTS PASS', 'color:#0f0', results);
+    } catch(e){ console.error('DOTRUSH TESTS FAIL', e); }
+  }
+  if (new URLSearchParams(location.search).get('test')==='1') runSelfTests();
+  window.DOTRUSH_TESTS = runSelfTests;
+
+  // ---------- START ----------
+  function showTitle(){ msg('DOT RUSH', 1200); preloadRewarded(); }
+  showTitle(); applyEquipped(); ensureDailyChallenge();
+  addEventListener('pointerdown', ()=>{ if (!state.running) reset(); }, { once:true });
+})();
+</script>
+</body>
+</html>
